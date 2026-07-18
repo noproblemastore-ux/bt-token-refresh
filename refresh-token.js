@@ -33,11 +33,10 @@ async function getBearerToken() {
     const headers = request.headers();
     
     if (url.includes('api-framework.blueticket.pt')) {
-      console.log(`   api-framework request: ${url.substring(0, 80)}`);
       const auth = headers['authorization'];
       if (auth && auth.startsWith('Bearer ')) {
         capturedToken = auth.replace('Bearer ', '').trim();
-        console.log(`   ✅ Token capturado!`);
+        console.log(`   ✅ Token capturado de: ${url.substring(0, 60)}`);
       }
     }
     
@@ -52,47 +51,58 @@ async function getBearerToken() {
 
   console.log('   Navegando a Jerónimos...');
   await page.goto(JERONIMOS_URL, { waitUntil: 'networkidle', timeout: 45000 });
-  console.log(`   Título: ${await page.title()}`);
-  
-  // Esperar que cargue el calendario
-  await sleep(3000);
-  
-  // Intentar hacer click en la primera fecha disponible del calendario
-  console.log('   Buscando fecha disponible para clickear...');
-  
-  try {
-    // Buscar botones de fecha disponibles (no disabled)
-    const dateButton = await page.$('button.day:not([disabled]), .flatpickr-day:not(.disabled):not(.flatpickr-disabled), [data-date]:not([disabled])');
-    if (dateButton) {
-      console.log('   Click en fecha disponible...');
-      await dateButton.click();
-      await sleep(5000);
-    } else {
-      console.log('   No encontré botón de fecha, intentando selector alternativo...');
-      // Intentar con cualquier elemento clickeable del calendario
-      const altButton = await page.$('.available, .day.available, span.flatpickr-day:not(.disabled)');
-      if (altButton) {
-        await altButton.click();
-        await sleep(5000);
+  console.log(`   Página cargada. Esperando widget de slots (5s)...`);
+  await sleep(5000);
+
+  // Log del HTML del área de slots para entender la estructura
+  const slotAreaHtml = await page.evaluate(() => {
+    const slot = document.querySelector('#slot-widget, .slot-widget, [id*="slot"], [class*="slot-picker"], iframe');
+    if (slot) return slot.outerHTML.substring(0, 500);
+    
+    // Si hay iframe, log su src
+    const iframes = Array.from(document.querySelectorAll('iframe')).map(i => i.src);
+    if (iframes.length) return 'IFRAMES: ' + iframes.join(', ');
+    
+    // Buscar el contenedor del widget
+    const containers = ['#event-slots', '#timeslot', '.timeslot', '[data-widget]', '#purchase-widget'];
+    for (const sel of containers) {
+      const el = document.querySelector(sel);
+      if (el) return `${sel}: ${el.outerHTML.substring(0, 300)}`;
+    }
+    
+    return 'No encontré widget de slots. Body classes: ' + document.body.className;
+  });
+  console.log('   Widget HTML:', slotAreaHtml);
+
+  // Intentar click en cualquier fecha/día visible
+  const clicked = await page.evaluate(() => {
+    // Buscar todos los elementos clickeables que parezcan fechas
+    const selectors = [
+      '[class*="fri"]', '[class*="sat"]', '[class*="sun"]', '[class*="tue"]', '[class*="wed"]', '[class*="thu"]',
+      '[data-date]', '[data-day]', '.day', '.date-cell',
+      'td:not(.disabled)', '[role="gridcell"]:not([aria-disabled])'
+    ];
+    
+    for (const sel of selectors) {
+      const els = document.querySelectorAll(sel);
+      for (const el of els) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          el.click();
+          return `Clicked: ${sel} → ${el.className} text:${el.textContent?.trim().substring(0,10)}`;
+        }
       }
     }
-  } catch(e) {
-    console.log(`   Warning click: ${e.message}`);
-  }
+    return 'No encontré elemento para clickear';
+  });
+  console.log('   Click result:', clicked);
+  
+  await sleep(8000);
 
-  // Esperar token hasta 15s más
-  for (let i = 0; i < 15; i++) {
-    if (capturedToken) break;
-    await sleep(1000);
-    if (i % 5 === 4) console.log(`   ${i + 1}s adicionales esperando...`);
-  }
-
-  // Log todos los elementos de fecha para debug
   if (!capturedToken) {
-    const buttons = await page.$$eval('button, [class*="day"], [class*="date"]', els => 
-      els.slice(0, 10).map(e => ({ tag: e.tagName, class: e.className.substring(0, 50), text: e.textContent?.trim().substring(0, 20) }))
-    );
-    console.log('   Elementos de fecha encontrados:', JSON.stringify(buttons));
+    // Intentar hacer scroll y esperar más
+    await page.evaluate(() => window.scrollBy(0, 300));
+    await sleep(5000);
   }
 
   await browser.close();
