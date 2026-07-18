@@ -16,27 +16,37 @@ async function getBearerToken() {
   console.log('🌐 Lanzando Chromium...');
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-web-security',
+    ],
   });
 
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     locale: 'en-GB',
+    viewport: { width: 1280, height: 800 },
   });
 
   let capturedToken = null;
+  const allRequests = [];
 
-  // Interceptar requests via route — más confiable que page.on('request')
   await context.route('**/*', async (route) => {
     const request = route.request();
     const url = request.url();
+    const headers = request.headers();
     
-    if (url.includes('api-framework.blueticket.pt')) {
-      const headers = request.headers();
+    // Log ALL requests for debug
+    allRequests.push(url);
+    
+    if (url.includes('api-framework.blueticket.pt') || url.includes('blueticket')) {
+      console.log(`   Blueticket request: ${url.substring(0, 80)}`);
       const auth = headers['authorization'];
       if (auth && auth.startsWith('Bearer ')) {
         capturedToken = auth.replace('Bearer ', '').trim();
-        console.log(`   Token capturado de: ${url.split('?')[0]}`);
+        console.log(`   ✅ Token capturado!`);
       }
     }
     
@@ -47,40 +57,40 @@ async function getBearerToken() {
   
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
   });
 
   console.log('   Navegando a Jerónimos...');
   
   try {
-    await page.goto(JERONIMOS_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(JERONIMOS_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    console.log(`   Página cargada. Título: ${await page.title()}`);
+    console.log(`   URL actual: ${page.url()}`);
   } catch(e) {
-    console.log(`   Warning navegacion: ${e.message}`);
+    console.log(`   Warning: ${e.message}`);
+    console.log(`   URL actual: ${page.url()}`);
   }
 
-  // Esperar hasta 20 segundos para que aparezca el token
-  console.log('   Esperando token (hasta 20s)...');
-  for (let i = 0; i < 20; i++) {
+  // Esperar 25 segundos
+  for (let i = 0; i < 25; i++) {
     if (capturedToken) break;
     await sleep(1000);
-    console.log(`   ${i + 1}s...`);
+    if (i % 5 === 4) console.log(`   ${i + 1}s esperando...`);
   }
 
-  // Si no capturamos el token, intentar hacer scroll para triggear lazy load
-  if (!capturedToken) {
-    console.log('   Intentando scroll para triggear requests...');
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await sleep(3000);
-  }
+  // Log todos los dominios que se contactaron
+  const domains = [...new Set(allRequests.map(u => {
+    try { return new URL(u).hostname; } catch { return u; }
+  }))];
+  console.log(`\n   Dominios contactados: ${domains.join(', ')}`);
 
   await browser.close();
 
   if (!capturedToken) {
-    console.error('ERROR: No se capturó ningún Bearer token después de 23s');
-    // Log URL actual y título para debug
+    console.error('ERROR: No se capturó ningún Bearer token');
     process.exit(1);
   }
 
-  console.log('✅ Token obtenido correctamente');
   return capturedToken;
 }
 
@@ -96,14 +106,14 @@ async function saveSecret(token) {
   });
   if (!res.ok) {
     const text = await res.text();
-    console.error(`ERROR guardando secret: ${res.status} — ${text}`);
+    console.error(`ERROR: ${res.status} — ${text}`);
     process.exit(1);
   }
-  console.log('   Secret JERONIMOS_TOKEN actualizado en Supabase ✅');
+  console.log('   ✅ Secret actualizado');
 }
 
 async function triggerSync() {
-  console.log('\n🚀 Triggering jeronimos-sync Edge Function...');
+  console.log('\n🚀 Triggering jeronimos-sync...');
   const res = await fetch(`https://${SUPABASE_PROJECT_ID}.supabase.co/functions/v1/jeronimos-sync`, {
     method: 'POST',
     headers: {
@@ -112,7 +122,7 @@ async function triggerSync() {
     },
     body: JSON.stringify({}),
   });
-  console.log(`   Sync triggered: ${res.status}`);
+  console.log(`   Sync: ${res.status}`);
 }
 
 async function main() {
@@ -120,7 +130,7 @@ async function main() {
   const token = await getBearerToken();
   await saveSecret(token);
   await triggerSync();
-  console.log('\n✅ Todo listo — token renovado y sync ejecutado');
+  console.log('\n✅ Listo');
 }
 
 main().catch(err => {
