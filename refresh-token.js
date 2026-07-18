@@ -1,8 +1,6 @@
 const { chromium } = require('playwright');
 
-// ── Config ───────────────────────────────────────────────────────────────────
 const JERONIMOS_URL       = 'https://mmp.bymeoblueticket.pt/en/event/14759/mosteiro-dos-jeronimos-claustro';
-const SUPABASE_URL        = 'https://odhogdwxafqdlfvfbsux.supabase.co';
 const SUPABASE_PROJECT_ID = 'odhogdwxafqdlfvfbsux';
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_MGMT_TOKEN   = process.env.SUPABASE_MANAGEMENT_TOKEN;
@@ -14,7 +12,6 @@ if (!SUPABASE_SERVICE_ROLE || !SUPABASE_MGMT_TOKEN) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ── Step 1: Get Bearer token via Playwright ───────────────────────────────────
 async function getBearerToken() {
   console.log('🌐 Lanzando Chromium...');
   const browser = await chromium.launch({
@@ -27,34 +24,59 @@ async function getBearerToken() {
     locale: 'en-GB',
   });
 
+  let capturedToken = null;
+
+  // Interceptar requests via route — más confiable que page.on('request')
+  await context.route('**/*', async (route) => {
+    const request = route.request();
+    const url = request.url();
+    
+    if (url.includes('api-framework.blueticket.pt')) {
+      const headers = request.headers();
+      const auth = headers['authorization'];
+      if (auth && auth.startsWith('Bearer ')) {
+        capturedToken = auth.replace('Bearer ', '').trim();
+        console.log(`   Token capturado de: ${url.split('?')[0]}`);
+      }
+    }
+    
+    await route.continue();
+  });
+
   const page = await context.newPage();
+  
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
 
-  let capturedToken = null;
-
-  // Intercept requests to api-framework.blueticket.pt and capture Bearer token
-  page.on('request', request => {
-    const url = request.url();
-    if (url.includes('api-framework.blueticket.pt')) {
-      const auth = request.headers()['authorization'];
-      if (auth && auth.startsWith('Bearer ')) {
-        capturedToken = auth.replace('Bearer ', '').trim();
-        console.log(`   Token capturado (${capturedToken.length} chars)`);
-      }
-    }
-  });
-
   console.log('   Navegando a Jerónimos...');
-  await page.goto(JERONIMOS_URL, { waitUntil: 'networkidle', timeout: 30000 });
-  console.log('   Esperando que carguen los slots (5s)...');
-  await sleep(5000);
+  
+  try {
+    await page.goto(JERONIMOS_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  } catch(e) {
+    console.log(`   Warning navegacion: ${e.message}`);
+  }
+
+  // Esperar hasta 20 segundos para que aparezca el token
+  console.log('   Esperando token (hasta 20s)...');
+  for (let i = 0; i < 20; i++) {
+    if (capturedToken) break;
+    await sleep(1000);
+    console.log(`   ${i + 1}s...`);
+  }
+
+  // Si no capturamos el token, intentar hacer scroll para triggear lazy load
+  if (!capturedToken) {
+    console.log('   Intentando scroll para triggear requests...');
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await sleep(3000);
+  }
 
   await browser.close();
 
   if (!capturedToken) {
-    console.error('ERROR: No se capturó ningún Bearer token');
+    console.error('ERROR: No se capturó ningún Bearer token después de 23s');
+    // Log URL actual y título para debug
     process.exit(1);
   }
 
@@ -62,13 +84,12 @@ async function getBearerToken() {
   return capturedToken;
 }
 
-// ── Step 2: Save token to Supabase secret ────────────────────────────────────
 async function saveSecret(token) {
   console.log('\n💾 Guardando token en Supabase secret...');
   const res = await fetch(`https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}/secrets`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${SUPABASE_MGMT_TOKEN}`,
+      'Authorization': `Bearer ${SUPABASE_MGMT_TOKEN}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify([{ name: 'JERONIMOS_TOKEN', value: token }]),
@@ -78,14 +99,12 @@ async function saveSecret(token) {
     console.error(`ERROR guardando secret: ${res.status} — ${text}`);
     process.exit(1);
   }
-  console.log('   Secret JERONIMOS_TOKEN actualizado en Supabase');
+  console.log('   Secret JERONIMOS_TOKEN actualizado en Supabase ✅');
 }
 
-// ── Step 3: Redeploy Edge Function so it picks up new secret ─────────────────
-async function redeployEdgeFunction() {
-  console.log('\n🚀 Triggering Edge Function redeploy...');
-  // Just call the function once to warm it up with new secret
-  const res = await fetch(`${SUPABASE_URL}/functions/v1/jeronimos-sync`, {
+async function triggerSync() {
+  console.log('\n🚀 Triggering jeronimos-sync Edge Function...');
+  const res = await fetch(`https://${SUPABASE_PROJECT_ID}.supabase.co/functions/v1/jeronimos-sync`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -96,14 +115,11 @@ async function redeployEdgeFunction() {
   console.log(`   Sync triggered: ${res.status}`);
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   console.log(`🚀 Jerónimos Token Refresh — ${new Date().toISOString()}\n`);
-
   const token = await getBearerToken();
   await saveSecret(token);
-  await redeployEdgeFunction();
-
+  await triggerSync();
   console.log('\n✅ Todo listo — token renovado y sync ejecutado');
 }
 
