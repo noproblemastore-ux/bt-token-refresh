@@ -27,16 +27,18 @@ async function getBearerToken() {
 
   let capturedToken = null;
 
+  // Interceptar a nivel de context — captura requests de TODOS los frames
   await context.route('**/*', async (route) => {
     const request = route.request();
     const url = request.url();
     const headers = request.headers();
     
     if (url.includes('api-framework.blueticket.pt')) {
+      console.log(`   api-framework: ${url.substring(0, 80)}`);
       const auth = headers['authorization'];
       if (auth && auth.startsWith('Bearer ')) {
         capturedToken = auth.replace('Bearer ', '').trim();
-        console.log(`   ✅ Token capturado de: ${url.substring(0, 60)}`);
+        console.log(`   ✅ Token capturado!`);
       }
     }
     
@@ -51,58 +53,55 @@ async function getBearerToken() {
 
   console.log('   Navegando a Jerónimos...');
   await page.goto(JERONIMOS_URL, { waitUntil: 'networkidle', timeout: 45000 });
-  console.log(`   Página cargada. Esperando widget de slots (5s)...`);
-  await sleep(5000);
+  console.log(`   Página cargada.`);
+  await sleep(3000);
 
-  // Log del HTML del área de slots para entender la estructura
-  const slotAreaHtml = await page.evaluate(() => {
-    const slot = document.querySelector('#slot-widget, .slot-widget, [id*="slot"], [class*="slot-picker"], iframe');
-    if (slot) return slot.outerHTML.substring(0, 500);
-    
-    // Si hay iframe, log su src
-    const iframes = Array.from(document.querySelectorAll('iframe')).map(i => i.src);
-    if (iframes.length) return 'IFRAMES: ' + iframes.join(', ');
-    
-    // Buscar el contenedor del widget
-    const containers = ['#event-slots', '#timeslot', '.timeslot', '[data-widget]', '#purchase-widget'];
-    for (const sel of containers) {
-      const el = document.querySelector(sel);
-      if (el) return `${sel}: ${el.outerHTML.substring(0, 300)}`;
-    }
-    
-    return 'No encontré widget de slots. Body classes: ' + document.body.className;
-  });
-  console.log('   Widget HTML:', slotAreaHtml);
+  // Log todos los iframes de la página
+  const frames = page.frames();
+  console.log(`   Frames encontrados: ${frames.length}`);
+  for (const frame of frames) {
+    console.log(`   Frame: ${frame.url().substring(0, 100)}`);
+  }
 
-  // Intentar click en cualquier fecha/día visible
-  const clicked = await page.evaluate(() => {
-    // Buscar todos los elementos clickeables que parezcan fechas
-    const selectors = [
-      '[class*="fri"]', '[class*="sat"]', '[class*="sun"]', '[class*="tue"]', '[class*="wed"]', '[class*="thu"]',
-      '[data-date]', '[data-day]', '.day', '.date-cell',
-      'td:not(.disabled)', '[role="gridcell"]:not([aria-disabled])'
-    ];
+  // Buscar el frame del slot widget
+  const slotFrame = frames.find(f => 
+    f.url().includes('slot') || 
+    f.url().includes('timeslot') || 
+    f.url().includes('api-framework') ||
+    f.url().includes('LoadSession') ||
+    (f.url() !== 'about:blank' && f.url() !== '' && !f.url().includes('cookie') && !f.url().includes('usp'))
+  );
+
+  if (slotFrame) {
+    console.log(`   Slot frame encontrado: ${slotFrame.url()}`);
+    await sleep(2000);
     
-    for (const sel of selectors) {
-      const els = document.querySelectorAll(sel);
-      for (const el of els) {
-        const rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          el.click();
-          return `Clicked: ${sel} → ${el.className} text:${el.textContent?.trim().substring(0,10)}`;
-        }
+    // Log HTML del frame
+    const frameHtml = await slotFrame.evaluate(() => document.body?.innerHTML?.substring(0, 500) || 'empty');
+    console.log(`   Frame HTML: ${frameHtml}`);
+
+    // Intentar click en fecha dentro del frame
+    const clicked = await slotFrame.evaluate(() => {
+      const selectors = ['[class*="fri"]', '[class*="sat"]', '[class*="tue"]', '[class*="wed"]', '[class*="thu"]', 
+        '.day', '.date', '[data-date]', 'td', 'li'];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) { el.click(); return `Clicked ${sel}: ${el.className}`; }
       }
-    }
-    return 'No encontré elemento para clickear';
-  });
-  console.log('   Click result:', clicked);
-  
-  await sleep(8000);
-
-  if (!capturedToken) {
-    // Intentar hacer scroll y esperar más
-    await page.evaluate(() => window.scrollBy(0, 300));
+      return 'No element found in frame';
+    });
+    console.log(`   Frame click: ${clicked}`);
     await sleep(5000);
+  } else {
+    console.log('   No encontré slot frame, esperando más...');
+    await sleep(10000);
+    
+    // Log frames de nuevo después de esperar
+    const frames2 = page.frames();
+    console.log(`   Frames después de esperar: ${frames2.length}`);
+    for (const f of frames2) {
+      console.log(`   - ${f.url().substring(0, 100)}`);
+    }
   }
 
   await browser.close();
