@@ -2,7 +2,7 @@ name: Refresh Jerónimos Token
 
 on:
   schedule:
-    - cron: '0 */12 * * *'
+    - cron: '*/45 * * * *'
   workflow_dispatch:
 
 jobs:
